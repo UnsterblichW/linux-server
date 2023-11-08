@@ -56,7 +56,7 @@ void http_conn::close_conn( bool real_close )
         //modfd( m_epollfd, m_sockfd, EPOLLIN );
         removefd( m_epollfd, m_sockfd );
         m_sockfd = -1;
-        m_user_count--;
+        m_user_count--; /* 关闭一个连接时，将客户总数-1 */
     }
 }
 
@@ -130,6 +130,7 @@ http_conn::LINE_STATUS http_conn::parse_line()
     return LINE_OPEN;
 }
 
+/* 循环读取客户端数据，直至无数据可读或者对方的连接关闭 */
 bool http_conn::read()
 {
     if( m_read_idx >= READ_BUFFER_SIZE )
@@ -159,6 +160,7 @@ bool http_conn::read()
     return true;
 }
 
+/* 解析HTTP请求行，获得请求方法、目标URL，以及HTTP版本号 */
 http_conn::HTTP_CODE http_conn::parse_request_line( char* text )
 {
     m_url = strpbrk( text, " \t" );
@@ -208,6 +210,7 @@ http_conn::HTTP_CODE http_conn::parse_request_line( char* text )
 
 http_conn::HTTP_CODE http_conn::parse_headers( char* text )
 {
+    /* 遇到空行，表示头部字段解析完毕 */
     if( text[ 0 ] == '\0' )
     {
         if ( m_method == HEAD )
@@ -215,6 +218,7 @@ http_conn::HTTP_CODE http_conn::parse_headers( char* text )
             return GET_REQUEST;
         }
 
+        /* 如果HTTP请求有消息体，则还需要读取m_content_length字节的消息体，状态机转移到CHECK_STATE_CONTENT状态 */
         if ( m_content_length != 0 )
         {
             m_check_state = CHECK_STATE_CONTENT;
@@ -253,6 +257,7 @@ http_conn::HTTP_CODE http_conn::parse_headers( char* text )
 
 }
 
+/* 此函数并没有真正解析HTTP请求的消息体，而是判断它是不是被完整地读入了 */
 http_conn::HTTP_CODE http_conn::parse_content( char* text )
 {
     if ( m_read_idx >= ( m_content_length + m_checked_idx ) )
@@ -321,6 +326,8 @@ http_conn::HTTP_CODE http_conn::process_read()
     return NO_REQUEST;
 }
 
+/* 当得到一个完整、正确的HTTP请求时，我们就分析目标文件的属性。如果目标文件存在、对所有用户可读，且不是目录，
+则使用mmap将其映射到内存地址m_file_address处，并告诉调用者获取文件成功 */
 http_conn::HTTP_CODE http_conn::do_request()
 {
     strcpy( m_real_file, doc_root );
@@ -356,6 +363,7 @@ void http_conn::unmap()
     }
 }
 
+/* 写HTTP响应 */
 bool http_conn::write()
 {
     int temp = 0;
@@ -373,6 +381,8 @@ bool http_conn::write()
         temp = writev( m_sockfd, m_iv, m_iv_count );
         if ( temp <= -1 )
         {
+            /* 如果TCP写缓冲没有空闲，则等待下一轮EPOLLOUT事件。
+            虽然在此期间，服务器无法立即接收到下一个请求，但这样做可以保证完整性 */
             if( errno == EAGAIN )
             {
                 modfd( m_epollfd, m_sockfd, EPOLLOUT );
@@ -386,6 +396,7 @@ bool http_conn::write()
         bytes_have_send += temp;
         if ( bytes_to_send <= bytes_have_send )
         {
+            /* 发送HTTP响应成功，根据HTTP请求中的Connection字段决定是否要立即关闭连接 */
             unmap();
             if( m_linger )
             {
@@ -402,6 +413,7 @@ bool http_conn::write()
     }
 }
 
+/* 往写缓冲中写入待发送的数据 */
 bool http_conn::add_response( const char* format, ... )
 {
     if( m_write_idx >= WRITE_BUFFER_SIZE )
@@ -531,6 +543,7 @@ bool http_conn::process_write( HTTP_CODE ret )
     return true;
 }
 
+/* 由线程池中的工作线程调用，这是HTTP请求的入口函数 */
 void http_conn::process()
 {
     HTTP_CODE read_ret = process_read();
